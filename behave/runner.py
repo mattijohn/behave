@@ -3,6 +3,7 @@
 from __future__ import with_statement, print_function
 import contextlib
 import os.path
+import multiprocessing
 import StringIO
 import sys
 import traceback
@@ -457,6 +458,18 @@ class ModelRunner(object):
         if self.config.log_capture:
             self.log_capture.abandon()
 
+    @staticmethod
+    def run_feature(runner, feature):
+        try:
+            for formatter in runner.formatters:
+                formatter.uri(feature.filename)
+
+            failed = feature.run(runner)
+        except KeyboardInterrupt:
+            failed = True
+
+        return failed
+
     def run_model(self, features=None):
         if not self.context:
             self.context = Context(self)
@@ -471,30 +484,25 @@ class ModelRunner(object):
         run_feature = not self.aborted
         failed_count = 0
         undefined_steps_initial_size = len(self.undefined_steps)
+        jobs = []
+        # TODO: no. of processes should not equal the number of features
+        # Add to a queue and then start a limited number of processses
         for feature in features:
             if run_feature:
-                try:
-                    self.feature = feature
-                    for formatter in self.formatters:
-                        formatter.uri(feature.filename)
+                p = multiprocessing.Process(target=self.run_feature, args=(self, feature))
+                jobs.append(p)
+                p.start()
 
-                    failed = feature.run(self)
-                    if failed:
-                        failed_count += 1
-                        if self.config.stop or self.aborted:
-                            # -- FAIL-EARLY: After first failure.
-                            run_feature = False
-                except KeyboardInterrupt:
-                    self.aborted = True
-                    failed_count += 1
-                    run_feature = False
-
+        results = [p.join() or 0 for p in jobs]
             # -- ALWAYS: Report run/not-run feature to reporters.
             # REQUIRED-FOR: Summary to keep track of untested features.
-            for reporter in self.config.reporters:
-                reporter.feature(feature)
+            # TODO: support feature reporters
+            #for reporter in self.config.reporters:
+            #    reporter.feature(feature)
+
 
         # -- AFTER-ALL:
+        # TODO: handle aborts
         if self.aborted:
             print("\nABORTED: By user.")
         for formatter in self.formatters:
@@ -502,8 +510,8 @@ class ModelRunner(object):
         self.run_hook('after_all', self.context)
         for reporter in self.config.reporters:
             reporter.end()
-        # if self.aborted:
-        #     print("\nABORTED: By user.")
+
+        failed_count = sum(results)
         failed = ((failed_count > 0) or self.aborted or
                   (len(self.undefined_steps) > undefined_steps_initial_size))
         return failed
